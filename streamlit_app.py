@@ -832,6 +832,10 @@ with tabs[13]:
         st.write(f"Total rows: {len(sc)} | pp_price dtype: {sc['pp_price'].dtype} | dep_date_dt dtype: {sc['dep_date_dt'].dtype}")
         st.write(f"pp_price range: {sc['pp_price'].min():.2f} – {sc['pp_price'].max():.2f}")
         st.write(f"dep_date_dt range: {sc['dep_date_dt'].min()} – {sc['dep_date_dt'].max()}")
+
+        if sc.empty:
+            st.warning("No data with valid departure dates found for this selection.")
+        else:
         else:
             if sel_h == "All Hotels":
                 # Group by dep_date_dt directly — keep it as datetime
