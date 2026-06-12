@@ -154,7 +154,6 @@ def find_data_sheets(xl):
     """Return list of (sheet_name, df) that look like pricing sheets."""
     results = []
     for sname in xl.sheet_names:
-        # Skip admin sheets
         skip_keywords = ["board","namegiata","summary","pivot","sheet","comp data",
                          "exclusiv","direct","lh only","tr only","otb only"]
         if any(k in sname.lower() for k in skip_keywords):
@@ -163,17 +162,38 @@ def find_data_sheets(xl):
             raw = xl.parse(sname, header=None, dtype=str)
             if raw.shape[1] < 18 or raw.shape[0] < 5:
                 continue
-            # Check if any cell in first 10 rows contains a numeric giata-like value
-            sample = raw.iloc[:10, :5].values.flatten()
-            has_numeric = any(
-                str(v).strip().isdigit() and len(str(v).strip()) >= 4
-                for v in sample if v and str(v) != "nan"
-            )
-            if has_numeric:
+            # Look for giata-like numeric IDs anywhere in first 15 rows, first 3 cols
+            found = False
+            for ri in range(min(15, len(raw))):
+                for ci in range(min(3, raw.shape[1])):
+                    v = str(raw.iloc[ri, ci]).strip()
+                    if v.isdigit() and len(v) >= 4:
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
                 results.append((sname, raw))
         except Exception:
             continue
     return results
+
+
+def find_col_mapping(data_df):
+    """
+    Detect which column index contains pp_price by finding first row
+    where col 5 or nearby has a value that looks like a holiday price (>500).
+    Returns col offset (0 = standard, 1 = shifted by header row).
+    """
+    for ci in [5, 6, 4]:
+        col = pd.to_numeric(
+            data_df.iloc[:5, ci].astype(str).str.replace(r"[£,]","",regex=True),
+            errors="coerce"
+        )
+        if col.dropna().gt(500).any():
+            return ci - 5  # offset from expected col 5
+    return 0
+
 
 def parse_pricing_file(uploaded_file, fname):
     dest, comp, file_dt = extract_meta(fname)
@@ -187,94 +207,111 @@ def parse_pricing_file(uploaded_file, fname):
             xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
             sheets = find_data_sheets(xl)
             if not sheets:
-                # fallback: try all sheets
                 sheets = []
                 for sn in xl.sheet_names:
                     try:
                         raw = xl.parse(sn, header=None, dtype=str)
                         if raw.shape[1] >= 18:
                             sheets.append((sn, raw))
-                    except: pass
+                    except:
+                        pass
     except Exception as e:
         st.error(f"Cannot open {fname}: {e}")
         return []
 
     for sname, raw in sheets:
         hrow = find_header_row(raw)
-        # Use row hrow as header, data starts hrow+1
         data = raw.iloc[hrow+1:].reset_index(drop=True).copy()
         data.columns = range(data.shape[1])
 
+        # Detect column offset in case sheet has extra leading columns
+        offset = find_col_mapping(data)
+
+        def gc(base):
+            """Get column index with offset applied, safely."""
+            idx = base + offset
+            return idx if idx < data.shape[1] else base
+
         for _, row in data.iterrows():
             try:
-                giata = str(row.get(0,"")).strip()
-                if not giata or giata in ("nan","-","","None"): continue
-                try: float(giata)
-                except: continue
+                giata = str(row.get(gc(0), "")).strip()
+                if not giata or giata in ("nan","-","","None"):
+                    continue
+                try:
+                    float(giata)
+                except:
+                    continue
 
-                hotel = str(row.get(1,"")).strip()
-                if not hotel or hotel in ("nan","None",""): continue
+                hotel = str(row.get(gc(1), "")).strip()
+                if not hotel or hotel in ("nan","None",""):
+                    continue
 
-                board  = str(row.get(2,"")).strip()
-                dep_raw= row.get(3,"")
-                dep_dt = parse_date(dep_raw)
-                nights = int(clean_num(row.get(4,7)) or 7)
+                board   = str(row.get(gc(2), "")).strip()
+                dep_raw = row.get(gc(3), "")
+                dep_dt  = parse_date(str(dep_raw)) if dep_raw and str(dep_raw) != "nan" else None
+                nights  = int(clean_num(row.get(gc(4), 7)) or 7)
 
-                pp  = clean_num(row.get(5))
-                cm  = clean_num(row.get(6))
-                oproom = str(row.get(7,"")).strip()
+                pp  = clean_num(row.get(gc(5)))
+                cm  = clean_num(row.get(gc(6)))
+                oproom = str(row.get(gc(7), "")).strip()
 
-                # Competitor price — try col 18 first (cheapest comp), fallback to 15/16/17
-                cp = clean_num(row.get(18))
+                # Cheapest comp: col 18, fallback 15/16/17
+                cp = clean_num(row.get(gc(18)))
                 if pd.isna(cp) or cp == 0:
-                    for ci in [15,16,17]:
-                        v = clean_num(row.get(ci))
+                    for ci in [15, 16, 17]:
+                        v = clean_num(row.get(gc(ci)))
                         if not pd.isna(v) and v > 0:
-                            cp = v; break
+                            cp = v
+                            break
 
-                diff_g = clean_num(row.get(19))
-                diff_p = clean_num(row.get(20))
-                result = str(row.get(21,"")).strip()
-                ma     = clean_num(row.get(22))
-                mr     = str(row.get(23,"")).strip()
+                diff_g = clean_num(row.get(gc(19)))
+                diff_p = clean_num(row.get(gc(20)))
+                result = str(row.get(gc(21), "")).strip()
+                ma     = clean_num(row.get(gc(22)))
+                mr     = str(row.get(gc(23), "")).strip()
 
-                if pd.isna(pp) or pp == 0: continue
+                # Validate price looks like a real holiday price
+                if pd.isna(pp) or pp < 100:
+                    continue
+
                 # Normalise result
-                if "no comp" in result.lower(): result = "Win - No Comp"
-                elif "aft change" in result.lower(): result = "Win Aft Change"
-                elif "win" in result.lower(): result = "Win"
-                elif "lose" in result.lower() or "loss" in result.lower(): result = "Lose"
-                else: continue
+                rl = result.lower()
+                if "no comp" in rl:           result = "Win - No Comp"
+                elif "aft change" in rl:       result = "Win Aft Change"
+                elif "win" in rl:              result = "Win"
+                elif "lose" in rl or "loss" in rl: result = "Lose"
+                else:
+                    continue
 
                 dep_month = dep_dt.strftime("%Y-%m") if dep_dt else ""
                 dw = dep_window(dep_dt, file_dt) if dep_dt else "241+"
                 mf = margin_flag(ma if not pd.isna(ma) else 0)
 
                 all_rows.append({
-                    "file_name": fname,
-                    "file_date": str(file_dt),
-                    "destination": dest,
-                    "competitor": comp,
-                    "giata": giata,
-                    "hotel_name": hotel,
-                    "board": board,
-                    "dep_date": str(dep_dt) if dep_dt else "",
-                    "dep_month": dep_month,
-                    "dep_window": dw,
-                    "nights": nights,
-                    "pp_price": float(pp),
+                    "file_name":      fname,
+                    "file_date":      str(file_dt),
+                    "destination":    dest,
+                    "competitor":     comp,
+                    "giata":          giata,
+                    "hotel_name":     hotel,
+                    "board":          board,
+                    "dep_date":       str(dep_dt) if dep_dt else "",
+                    "dep_month":      dep_month,
+                    "dep_window":     dw,
+                    "nights":         nights,
+                    "pp_price":       float(pp),
                     "current_margin": float(cm) if not pd.isna(cm) else 0.0,
-                    "op_room": oproom,
-                    "comp_price": float(cp) if not pd.isna(cp) else 0.0,
-                    "diff_gbp": float(diff_g) if not pd.isna(diff_g) else 0.0,
-                    "diff_pct": float(diff_p) if not pd.isna(diff_p) else 0.0,
-                    "result": result,
-                    "margin_after": float(ma) if not pd.isna(ma) else 0.0,
-                    "margin_range": mr,
-                    "margin_flag": mf,
-                    "booking_tier": "medium",
+                    "op_room":        oproom,
+                    "comp_price":     float(cp) if not pd.isna(cp) else 0.0,
+                    "diff_gbp":       float(diff_g) if not pd.isna(diff_g) else 0.0,
+                    "diff_pct":       float(diff_p) if not pd.isna(diff_p) else 0.0,
+                    "result":         result,
+                    "margin_after":   float(ma) if not pd.isna(ma) else 0.0,
+                    "margin_range":   mr,
+                    "margin_flag":    mf,
+                    "booking_tier":   "medium",
                     "priority_score": 0.0,
-                    "uploaded_at": datetime.now().isoformat(),
+                    "uploaded_at":    datetime.now().isoformat(),
                 })
             except Exception:
                 continue
@@ -782,22 +819,55 @@ with tabs[13]:
     # ── Seasonal curve ────────────────────────────────────────────────────────
     if not h.empty:
         h = h.copy()
-
-        # Force proper datetime conversion regardless of stored format
         h["dep_date_dt"] = pd.to_datetime(h["dep_date"].astype(str), dayfirst=True, errors="coerce")
         h["pp_price"]    = pd.to_numeric(h["pp_price"],   errors="coerce")
         h["comp_price"]  = pd.to_numeric(h["comp_price"], errors="coerce")
-
         sc = h.dropna(subset=["dep_date_dt"])
         sc = sc[sc["pp_price"] > 10].sort_values("dep_date_dt")
 
-        # Debug info — remove once confirmed working
-        with st.expander("🔍 Debug: sample data (remove later)"):
-            st.write(f"Rows after filter: {len(sc)}")
-            st.write(f"dep_date sample: {sc['dep_date'].head(3).tolist()}")
-            st.write(f"dep_date_dt sample: {sc['dep_date_dt'].head(3).tolist()}")
-            st.write(f"pp_price sample: {sc['pp_price'].head(3).tolist()}")
-            st.write(f"comp_price sample: {sc['comp_price'].head(3).tolist()}")
+        # Always show debug so we can diagnose
+        st.markdown("**🔍 Data check** (first 5 rows stored in DB):")
+        debug_cols = ["hotel_name","dep_date","dep_date_dt","pp_price","comp_price","result"]
+        st.dataframe(sc[debug_cols].head(5), use_container_width=True)
+        st.write(f"Total rows: {len(sc)} | pp_price dtype: {sc['pp_price'].dtype} | dep_date_dt dtype: {sc['dep_date_dt'].dtype}")
+        st.write(f"pp_price range: {sc['pp_price'].min():.2f} – {sc['pp_price'].max():.2f}")
+        st.write(f"dep_date_dt range: {sc['dep_date_dt'].min()} – {sc['dep_date_dt'].max()}")
+        else:
+            if sel_h == "All Hotels":
+                # Group by dep_date_dt directly — keep it as datetime
+                sc_grp = sc.groupby("dep_date_dt", as_index=False).agg(
+                    D2_pp  =("pp_price",   "mean"),
+                    Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
+                )
+                chart_title = f"Avg D2 vs LH Price by Departure Date — {', '.join(sel_trend_dest) if sel_trend_dest else 'All'}"
+            else:
+                sc_grp = sc.groupby("dep_date_dt", as_index=False).agg(
+                    D2_pp  =("pp_price",   "mean"),
+                    Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
+                )
+                chart_title = f"{sel_h} — D2 vs LoveHolidays Price by Departure Date"
+
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(
+                x=sc_grp["dep_date_dt"], y=sc_grp["D2_pp"],
+                name="D2 Price £", mode="lines+markers",
+                line=dict(color="#1B6FD4", width=3), marker=dict(size=6)
+            ))
+            comp_valid = sc_grp[sc_grp["Comp_pp"].notna() & (sc_grp["Comp_pp"] > 10)]
+            if not comp_valid.empty:
+                fig_sc.add_trace(go.Scatter(
+                    x=comp_valid["dep_date_dt"], y=comp_valid["Comp_pp"],
+                    name="LH Price £", mode="lines+markers",
+                    line=dict(color="#E04A3F", width=2, dash="dot"), marker=dict(size=6)
+                ))
+            fig_sc.update_layout(
+                title=chart_title,
+                xaxis_title="Departure Date", yaxis_title="Price per person £",
+                xaxis=dict(type="date"),
+                height=380, hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+            st.plotly_chart(fig_sc, use_container_width=True)
 
         if sel_h == "All Hotels":
             # Aggregate all hotels by departure date
