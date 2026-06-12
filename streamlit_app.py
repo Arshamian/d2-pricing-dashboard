@@ -545,9 +545,9 @@ with tabs[2]:
         return "Dest-guided"
     v["Action"]= v.apply(make_action,axis=1)
     v["Margin"]= v.apply(lambda r: margin_cell(r["current_margin"],r["margin_after"]),axis=1)
-    show3 = v[["hotel_name","destination","dep_window","dep_month","board",
+    show3 = v[["giata","hotel_name","destination","dep_window","dep_month","board",
                "pp_price","comp_price","diff_pct","result","Margin","Action","booking_tier"]].copy()
-    show3.columns=["Hotel","Dest","Window","Month","Board","D2 £pp","Comp £pp","Diff %","Result","Margin","Action","Tier"]
+    show3.columns=["Giata","Hotel","Dest","Window","Month","Board","D2 £pp","Comp £pp","Diff %","Result","Margin","Action","Tier"]
     st.dataframe(show3.style.format({"D2 £pp":"{:.0f}","Comp £pp":"{:.0f}","Diff %":"{:.1f}%"}),
                  use_container_width=True,height=600)
 
@@ -570,9 +570,9 @@ with tabs[3]:
     cands["Action"] = cands.apply(lambda r:
         "SUPPRESS — floor breach" if r["margin_flag"]=="floor"
         else f"↓ Reduce ~£{abs(r['comp_price']-r['pp_price']):.0f}pp",axis=1)
-    show4=cands[["hotel_name","destination","dep_window","dep_month",
+    show4=cands[["giata","hotel_name","destination","dep_window","dep_month",
                   "pp_price","comp_price","diff_pct","Margin","Flag","Action","booking_tier"]].copy()
-    show4.columns=["Hotel","Dest","Window","Month","D2 £pp","Comp £pp","Diff %","Margin","Flag","Action","Tier"]
+    show4.columns=["Giata","Hotel","Dest","Window","Month","D2 £pp","Comp £pp","Diff %","Margin","Flag","Action","Tier"]
     st.dataframe(show4.style.format({"D2 £pp":"{:.0f}","Comp £pp":"{:.0f}","Diff %":"{:.1f}%"}),
                  use_container_width=True,height=550)
 
@@ -715,49 +715,78 @@ with tabs[12]:
 with tabs[13]:
     st.subheader("↗ Price Trends")
 
-    hotel_list = sorted(df["hotel_name"].unique().tolist())
+    # ── Filters row ──────────────────────────────────────────────────────────
+    fc1, fc2, fc3, fc4 = st.columns([2,2,2,2])
+
+    all_trend_dests = sorted(df["destination"].unique().tolist())
+    sel_trend_dest  = fc1.multiselect("Destination", all_trend_dests,
+                                       default=all_trend_dests, key="td_dest")
+
+    all_trend_comps = sorted(df["competitor"].unique().tolist())
+    sel_trend_comp  = fc2.multiselect("Competitor", all_trend_comps,
+                                       default=all_trend_comps, key="td_comp")
+
+    trend_df = df.copy()
+    if sel_trend_dest: trend_df = trend_df[trend_df["destination"].isin(sel_trend_dest)]
+    if sel_trend_comp: trend_df = trend_df[trend_df["competitor"].isin(sel_trend_comp)]
+
+    hotel_list = ["All Hotels"] + sorted(trend_df["hotel_name"].unique().tolist())
     worst_hotel = (loses_df.nsmallest(1,"diff_pct")["hotel_name"].values[0]
-                   if not loses_df.empty else hotel_list[0])
+                   if not loses_df.empty else hotel_list[1] if len(hotel_list)>1 else "All Hotels")
+    default_idx = hotel_list.index(worst_hotel) if worst_hotel in hotel_list else 0
 
-    col1, col2 = st.columns([4,1])
-    sel_h = col1.selectbox("Select hotel (type to search)", hotel_list,
-                            index=hotel_list.index(worst_hotel) if worst_hotel in hotel_list else 0)
-    sel_b = col2.selectbox("Board", ["All"] +
-                            sorted(df[df["hotel_name"]==sel_h]["board"].unique().tolist()))
+    sel_h = fc3.selectbox("Hotel (type to search)", hotel_list,
+                           index=default_idx, key="td_hotel")
 
-    h = df[df["hotel_name"]==sel_h].copy()
-    if sel_b != "All": h = h[h["board"]==sel_b]
+    board_opts = ["All"]
+    if sel_h != "All Hotels":
+        board_opts += sorted(trend_df[trend_df["hotel_name"]==sel_h]["board"].unique().tolist())
+    else:
+        board_opts += sorted(trend_df["board"].unique().tolist())
+    sel_b = fc4.selectbox("Board", board_opts, key="td_board")
 
-    # ── Seasonal curve (D2 vs LH by departure date) ──────────────────────────
+    # Apply hotel/board filter
+    h = trend_df.copy()
+    if sel_h != "All Hotels": h = h[h["hotel_name"]==sel_h]
+    if sel_b != "All":        h = h[h["board"]==sel_b]
+
+    st.markdown("---")
+
+    # ── Seasonal curve ────────────────────────────────────────────────────────
     if not h.empty:
-        sc = h.copy()
-        sc["dep_date_dt"] = pd.to_datetime(sc["dep_date"], errors="coerce")
-        sc = sc.dropna(subset=["dep_date_dt"]).sort_values("dep_date_dt")
+        h["dep_date_dt"] = pd.to_datetime(h["dep_date"], errors="coerce")
+        sc = h.dropna(subset=["dep_date_dt"]).sort_values("dep_date_dt")
 
-        # Average by departure date where multiple rows exist
-        sc_grp = sc.groupby("dep_date_dt").agg(
-            D2_pp   =("pp_price","mean"),
-            Comp_pp =("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan),
-            Result  =("result","first")
-        ).reset_index()
+        if sel_h == "All Hotels":
+            # Aggregate all hotels by departure date
+            sc_grp = sc.groupby("dep_date_dt").agg(
+                D2_pp  =("pp_price","mean"),
+                Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
+            ).reset_index()
+            chart_title = f"Avg D2 vs LH Price by Departure Date — {', '.join(sel_trend_dest) if sel_trend_dest else 'All'}"
+        else:
+            sc_grp = sc.groupby("dep_date_dt").agg(
+                D2_pp  =("pp_price","mean"),
+                Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan),
+                Result =("result","first")
+            ).reset_index()
+            chart_title = f"{sel_h} — D2 vs LoveHolidays Price by Departure Date"
 
         fig_sc = go.Figure()
         fig_sc.add_trace(go.Scatter(
             x=sc_grp["dep_date_dt"], y=sc_grp["D2_pp"],
             name="D2 Price £", mode="lines+markers",
-            line=dict(color="#1B6FD4", width=3),
-            marker=dict(size=6)
+            line=dict(color="#1B6FD4", width=3), marker=dict(size=6)
         ))
         comp_valid = sc_grp[sc_grp["Comp_pp"].notna() & (sc_grp["Comp_pp"]>0)]
         if not comp_valid.empty:
             fig_sc.add_trace(go.Scatter(
                 x=comp_valid["dep_date_dt"], y=comp_valid["Comp_pp"],
                 name="LH Price £", mode="lines+markers",
-                line=dict(color="#E04A3F", width=2, dash="dot"),
-                marker=dict(size=6)
+                line=dict(color="#E04A3F", width=2, dash="dot"), marker=dict(size=6)
             ))
         fig_sc.update_layout(
-            title=f"{sel_h} — D2 vs LoveHolidays Price by Departure Date",
+            title=chart_title,
             xaxis_title="Departure Date", yaxis_title="Price per person £",
             height=380, hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02)
@@ -767,11 +796,11 @@ with tabs[13]:
     st.markdown("---")
     col3, col4 = st.columns(2)
 
-    # ── Win Rate by departure month (bar chart, colour-coded) ─────────────────
+    # ── Win Rate by departure month ───────────────────────────────────────────
     with col3:
-        dest_list = sorted(comp_df["destination"].unique().tolist()) if not comp_df.empty else ["MLE"]
-        sel_dest2 = st.selectbox("Destination for win rate", dest_list, key="wr_dest")
-        wr_src = comp_df[comp_df["destination"]==sel_dest2] if not comp_df.empty else pd.DataFrame()
+        wr_src = trend_df[trend_df["result"].isin(["Win","Lose"])]
+        if sel_h != "All Hotels":
+            wr_src = wr_src[wr_src["hotel_name"]==sel_h]
 
         if not wr_src.empty:
             wr_m = wr_src.groupby("dep_month").apply(
@@ -791,8 +820,9 @@ with tabs[13]:
             ))
             fig_wr.add_hline(y=50, line_dash="dot", line_color="#E04A3F",
                               annotation_text="50%", annotation_position="right")
+            lbl = sel_h if sel_h != "All Hotels" else f"{', '.join(sel_trend_dest) if sel_trend_dest else 'All'}"
             fig_wr.update_layout(
-                title=f"Win Rate by Departure Month (vs LH) — {sel_dest2}",
+                title=f"Win Rate by Departure Month — {lbl}",
                 yaxis=dict(range=[0,100], title="Win Rate %"),
                 xaxis_title="Departure Month",
                 height=320, showlegend=False
@@ -801,8 +831,12 @@ with tabs[13]:
 
     # ── Overall Win Rate Trend across run dates ───────────────────────────────
     with col4:
-        if df["file_date"].nunique() > 1:
-            wr_run = comp_df.groupby("file_date").apply(
+        wr_run_src = trend_df[trend_df["result"].isin(["Win","Lose"])]
+        if sel_h != "All Hotels":
+            wr_run_src = wr_run_src[wr_run_src["hotel_name"]==sel_h]
+
+        if wr_run_src["file_date"].nunique() > 1:
+            wr_run = wr_run_src.groupby("file_date").apply(
                 lambda g: (g["result"]=="Win").sum()/len(g)*100
             ).reset_index()
             wr_run.columns = ["RunDate","WinRate"]
@@ -815,30 +849,27 @@ with tabs[13]:
                 mode="lines+markers",
                 line=dict(color="#27AE60", width=2.5),
                 marker=dict(size=8, color="#27AE60"),
-                name="Win Rate %",
-                fill="tozeroy",
-                fillcolor="rgba(39,174,96,0.1)"
+                fill="tozeroy", fillcolor="rgba(39,174,96,0.1)"
             ))
             fig_run.update_layout(
-                title=f"Overall Win Rate Trend ({wr_run['Label'].iloc[0]}–{wr_run['Label'].iloc[-1]})",
+                title=f"Win Rate Trend ({wr_run['Label'].iloc[0]}–{wr_run['Label'].iloc[-1]})",
                 yaxis=dict(title="Win Rate %"),
                 xaxis_title="Run Date",
                 height=320, showlegend=False
             )
             st.plotly_chart(fig_run, use_container_width=True)
         else:
-            st.info("Upload 2+ run files to see win rate trend over time.")
-            # Show placeholder with current win rate
-            if not comp_df.empty:
-                wr_now = len(wins_df)/len(comp_df)*100
+            if not wr_run_src.empty:
+                wr_now = (wr_run_src["result"]=="Win").sum()/len(wr_run_src)*100
                 st.metric("Current Win Rate", f"{wr_now:.1f}%",
-                           "Upload more run files to track trend")
+                           "Upload more run files to track trend over time")
 
     # ── Price drift across run dates ──────────────────────────────────────────
-    if df["file_date"].nunique() > 1:
+    if trend_df["file_date"].nunique() > 1:
         st.markdown("#### Price Drift Across Run Dates")
-        drift = df[df["hotel_name"]==sel_h].groupby("file_date").agg(
-            D2=("pp_price","mean"),
+        drift_src = h if sel_h != "All Hotels" else trend_df
+        drift = drift_src.groupby("file_date").agg(
+            D2  =("pp_price","mean"),
             Comp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
         ).reset_index().sort_values("file_date")
         drift["Label"] = pd.to_datetime(drift["file_date"]).dt.strftime("%d %b")
@@ -847,9 +878,11 @@ with tabs[13]:
             name="D2 avg £pp",line=dict(color="#1B6FD4",width=2.5),mode="lines+markers"))
         if drift["Comp"].notna().any():
             fig_dr.add_trace(go.Scatter(x=drift["Label"],y=drift["Comp"],
-                name="LH avg £pp",line=dict(color="#E04A3F",width=2,dash="dash"),mode="lines+markers"))
-        fig_dr.update_layout(title=f"Price Drift — {sel_h}",height=260,
-                              xaxis_title="Run Date",yaxis_title="£ pp")
+                name="LH avg £pp",line=dict(color="#E04A3F",width=2,dash="dash"),
+                mode="lines+markers"))
+        drift_title = sel_h if sel_h != "All Hotels" else f"All Hotels — {', '.join(sel_trend_dest) if sel_trend_dest else 'All'}"
+        fig_dr.update_layout(title=f"Price Drift — {drift_title}",
+                              height=260,xaxis_title="Run Date",yaxis_title="£ pp")
         st.plotly_chart(fig_dr, use_container_width=True)
 
 # ── 15. FILES ──────────────────────────────────────────────────────────────────
