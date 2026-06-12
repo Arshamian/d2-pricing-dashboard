@@ -328,29 +328,27 @@ def load_data(dest=None, comp=None, window=None, files=None):
     if df.empty:
         return df
 
-    # Ensure numeric columns are properly typed after SQLite load
-    num_cols = ["pp_price","comp_price","current_margin","margin_after",
-                "diff_pct","diff_gbp","priority_score"]
-    for col in num_cols:
+    # Cast numeric columns
+    for col in ["pp_price","comp_price","current_margin","margin_after",
+                "diff_pct","diff_gbp","priority_score"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    # Parse dep_date back to proper date strings, and build dep_date_dt
-    df["dep_date"] = df["dep_date"].astype(str).str.strip()
-
-    # Remove any rows where dep_date looks invalid
-    df = df[df["dep_date"].str.match(r"\d{4}-\d{2}-\d{2}", na=False) |
-            df["dep_date"].str.match(r"\d{2}/\d{2}/\d{4}", na=False)]
-
-    # Normalise dep_month — recalculate from dep_date to be safe
-    def safe_dep_month(d):
+    # Parse dep_date safely — don't drop rows, just fix the column
+    def safe_parse(d):
         try:
-            return pd.to_datetime(d).strftime("%Y-%m")
+            return pd.to_datetime(str(d), dayfirst=True, errors="coerce")
         except:
-            return ""
-    df["dep_month"] = df["dep_date"].apply(safe_dep_month)
+            return pd.NaT
 
-    # Filter out rows with zero/missing prices
+    df["dep_date_dt"] = df["dep_date"].apply(safe_parse)
+
+    # Recalculate dep_month from parsed date
+    df["dep_month"] = df["dep_date_dt"].apply(
+        lambda d: d.strftime("%Y-%m") if pd.notna(d) else ""
+    )
+
+    # Only filter out truly zero-price rows
     df = df[df["pp_price"] > 0]
 
     return df
@@ -784,7 +782,9 @@ with tabs[13]:
     # ── Seasonal curve ────────────────────────────────────────────────────────
     if not h.empty:
         h = h.copy()
-        h["dep_date_dt"] = pd.to_datetime(h["dep_date"], errors="coerce")
+        # dep_date_dt already added in load_data
+        if "dep_date_dt" not in h.columns:
+            h["dep_date_dt"] = pd.to_datetime(h["dep_date"], errors="coerce")
         sc = h.dropna(subset=["dep_date_dt"])
         sc = sc[sc["pp_price"] > 0].sort_values("dep_date_dt")
 
