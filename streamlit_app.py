@@ -415,9 +415,22 @@ with st.sidebar:
     st.markdown("---")
     if st.button("🗑 Clear ALL data"):
         conn = get_conn()
-        conn.execute("DELETE FROM pricing"); conn.execute("DELETE FROM bookings")
-        conn.commit(); conn.close()
-        st.success("Cleared"); st.rerun()
+        conn.execute("DELETE FROM pricing")
+        conn.execute("DELETE FROM bookings")
+        conn.commit()
+        conn.close()
+        st.success("Cleared")
+        st.rerun()
+
+    if st.button("🔴 FORCE RESET (drop & recreate DB)"):
+        conn = get_conn()
+        conn.execute("DROP TABLE IF EXISTS pricing")
+        conn.execute("DROP TABLE IF EXISTS bookings")
+        conn.commit()
+        conn.close()
+        init_db()
+        st.success("Database fully reset — please re-upload your files")
+        st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOAD DATA
