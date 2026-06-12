@@ -825,17 +825,49 @@ with tabs[13]:
         sc = h.dropna(subset=["dep_date_dt"])
         sc = sc[sc["pp_price"] > 10].sort_values("dep_date_dt")
 
-        # Always show debug so we can diagnose
-        st.markdown("**🔍 Data check** (first 5 rows stored in DB):")
-        debug_cols = ["hotel_name","dep_date","dep_date_dt","pp_price","comp_price","result"]
-        st.dataframe(sc[debug_cols].head(5), use_container_width=True)
-        st.write(f"Total rows: {len(sc)} | pp_price dtype: {sc['pp_price'].dtype} | dep_date_dt dtype: {sc['dep_date_dt'].dtype}")
-        st.write(f"pp_price range: {sc['pp_price'].min():.2f} – {sc['pp_price'].max():.2f}")
-        st.write(f"dep_date_dt range: {sc['dep_date_dt'].min()} – {sc['dep_date_dt'].max()}")
+        # Debug table
+        st.markdown("**🔍 Data check** (first 5 rows):")
+        show_cols = [c for c in ["hotel_name","dep_date","dep_date_dt","pp_price","comp_price","result"] if c in sc.columns]
+        st.dataframe(sc[show_cols].head(5), use_container_width=True)
+        st.write(f"Rows: {len(sc)} | pp_price range: {sc['pp_price'].min():.0f}–{sc['pp_price'].max():.0f}" if not sc.empty else "Rows: 0")
 
         if sc.empty:
-            st.warning("No data with valid departure dates found for this selection.")
+            st.warning("No data with valid departure dates and prices found.")
         else:
+            if sel_h == "All Hotels":
+                sc_grp = sc.groupby("dep_date_dt", as_index=False).agg(
+                    D2_pp  =("pp_price",   "mean"),
+                    Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
+                )
+                chart_title = f"Avg D2 vs LH Price by Departure Date — {', '.join(sel_trend_dest) if sel_trend_dest else 'All'}"
+            else:
+                sc_grp = sc.groupby("dep_date_dt", as_index=False).agg(
+                    D2_pp  =("pp_price",   "mean"),
+                    Comp_pp=("comp_price", lambda x: x[x>0].mean() if (x>0).any() else np.nan)
+                )
+                chart_title = f"{sel_h} — D2 vs LoveHolidays Price by Departure Date"
+
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(
+                x=sc_grp["dep_date_dt"], y=sc_grp["D2_pp"],
+                name="D2 Price £", mode="lines+markers",
+                line=dict(color="#1B6FD4", width=3), marker=dict(size=6)
+            ))
+            comp_valid = sc_grp[sc_grp["Comp_pp"].notna() & (sc_grp["Comp_pp"] > 10)]
+            if not comp_valid.empty:
+                fig_sc.add_trace(go.Scatter(
+                    x=comp_valid["dep_date_dt"], y=comp_valid["Comp_pp"],
+                    name="LH Price £", mode="lines+markers",
+                    line=dict(color="#E04A3F", width=2, dash="dot"), marker=dict(size=6)
+                ))
+            fig_sc.update_layout(
+                title=chart_title,
+                xaxis_title="Departure Date", yaxis_title="Price per person £",
+                xaxis=dict(type="date"),
+                height=380, hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+            st.plotly_chart(fig_sc, use_container_width=True)
         else:
             if sel_h == "All Hotels":
                 # Group by dep_date_dt directly — keep it as datetime
