@@ -428,6 +428,11 @@ with st.sidebar:
         conn.execute("DROP TABLE IF EXISTS bookings")
         conn.commit()
         conn.close()
+        import os
+        try:
+            os.remove(DB_PATH)
+        except:
+            pass
         init_db()
         st.success("Database fully reset — please re-upload your files")
         st.rerun()
