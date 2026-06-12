@@ -141,9 +141,13 @@ def margin_cell(cur, after):
 def find_header_row(df_raw):
     """Find the row index that contains column headers."""
     for i in range(min(10, len(df_raw))):
-        row_str = " ".join(df_raw.iloc[i].astype(str).str.lower())
-        if "giata" in row_str or ("hotel" in row_str and "price" in row_str):
-            return i
+        try:
+            vals = [str(v).lower() for v in df_raw.iloc[i].tolist()]
+            row_str = " ".join(vals)
+            if "giata" in row_str or ("hotel" in row_str and "price" in row_str):
+                return i
+        except Exception:
+            continue
     return 0
 
 def find_data_sheets(xl):
