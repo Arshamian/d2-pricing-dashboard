@@ -324,6 +324,35 @@ def load_data(dest=None, comp=None, window=None, files=None):
     if files:  q+=f" AND file_name IN ({','.join(['?']*len(files))})";    p+=files
     df = pd.read_sql_query(q, conn, params=p)
     conn.close()
+
+    if df.empty:
+        return df
+
+    # Ensure numeric columns are properly typed after SQLite load
+    num_cols = ["pp_price","comp_price","current_margin","margin_after",
+                "diff_pct","diff_gbp","priority_score"]
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # Parse dep_date back to proper date strings, and build dep_date_dt
+    df["dep_date"] = df["dep_date"].astype(str).str.strip()
+
+    # Remove any rows where dep_date looks invalid
+    df = df[df["dep_date"].str.match(r"\d{4}-\d{2}-\d{2}", na=False) |
+            df["dep_date"].str.match(r"\d{2}/\d{2}/\d{4}", na=False)]
+
+    # Normalise dep_month — recalculate from dep_date to be safe
+    def safe_dep_month(d):
+        try:
+            return pd.to_datetime(d).strftime("%Y-%m")
+        except:
+            return ""
+    df["dep_month"] = df["dep_date"].apply(safe_dep_month)
+
+    # Filter out rows with zero/missing prices
+    df = df[df["pp_price"] > 0]
+
     return df
 
 def get_distinct(col):
@@ -754,8 +783,10 @@ with tabs[13]:
 
     # ── Seasonal curve ────────────────────────────────────────────────────────
     if not h.empty:
+        h = h.copy()
         h["dep_date_dt"] = pd.to_datetime(h["dep_date"], errors="coerce")
-        sc = h.dropna(subset=["dep_date_dt"]).sort_values("dep_date_dt")
+        sc = h.dropna(subset=["dep_date_dt"])
+        sc = sc[sc["pp_price"] > 0].sort_values("dep_date_dt")
 
         if sel_h == "All Hotels":
             # Aggregate all hotels by departure date
@@ -809,7 +840,7 @@ with tabs[13]:
             wr_m.columns = ["Month","WinRate"]
             wr_m = wr_m.sort_values("Month")
             wr_m["Label"] = wr_m["Month"].apply(
-                lambda m: pd.to_datetime(m+"-01").strftime("%b %Y") if m else m)
+                lambda m: pd.to_datetime(m+"-01").strftime("%b %Y") if m and len(m)==7 else "")
             wr_m["Colour"] = wr_m["WinRate"].apply(
                 lambda v: "#C0392B" if v < 50 else "#27AE60")
 
