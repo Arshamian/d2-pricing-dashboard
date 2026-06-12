@@ -782,11 +782,22 @@ with tabs[13]:
     # ── Seasonal curve ────────────────────────────────────────────────────────
     if not h.empty:
         h = h.copy()
-        # dep_date_dt already added in load_data
-        if "dep_date_dt" not in h.columns:
-            h["dep_date_dt"] = pd.to_datetime(h["dep_date"], errors="coerce")
+
+        # Force proper datetime conversion regardless of stored format
+        h["dep_date_dt"] = pd.to_datetime(h["dep_date"].astype(str), dayfirst=True, errors="coerce")
+        h["pp_price"]    = pd.to_numeric(h["pp_price"],   errors="coerce")
+        h["comp_price"]  = pd.to_numeric(h["comp_price"], errors="coerce")
+
         sc = h.dropna(subset=["dep_date_dt"])
-        sc = sc[sc["pp_price"] > 0].sort_values("dep_date_dt")
+        sc = sc[sc["pp_price"] > 10].sort_values("dep_date_dt")
+
+        # Debug info — remove once confirmed working
+        with st.expander("🔍 Debug: sample data (remove later)"):
+            st.write(f"Rows after filter: {len(sc)}")
+            st.write(f"dep_date sample: {sc['dep_date'].head(3).tolist()}")
+            st.write(f"dep_date_dt sample: {sc['dep_date_dt'].head(3).tolist()}")
+            st.write(f"pp_price sample: {sc['pp_price'].head(3).tolist()}")
+            st.write(f"comp_price sample: {sc['comp_price'].head(3).tolist()}")
 
         if sel_h == "All Hotels":
             # Aggregate all hotels by departure date
