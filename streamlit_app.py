@@ -423,19 +423,41 @@ with st.sidebar:
         st.rerun()
 
     if st.button("🔴 FORCE RESET (drop & recreate DB)"):
-        conn = get_conn()
-        conn.execute("DROP TABLE IF EXISTS pricing")
-        conn.execute("DROP TABLE IF EXISTS bookings")
-        conn.commit()
-        conn.close()
-        import os
+        try:
+            conn = get_conn()
+            conn.execute("DROP TABLE IF EXISTS pricing")
+            conn.execute("DROP TABLE IF EXISTS bookings")
+            conn.commit()
+            conn.close()
+        except:
+            pass
         try:
             os.remove(DB_PATH)
         except:
             pass
+        # Write flag file so next rerun also clears
+        with open("reset_flag.txt","w") as f:
+            f.write("reset")
         init_db()
-        st.success("Database fully reset — please re-upload your files")
+        st.success("✅ Database reset complete! Now remove files from uploader, then re-add them.")
         st.rerun()
+
+    # Always show DB diagnostics
+    st.markdown("---")
+    st.markdown("**🔍 DB Status**")
+    try:
+        conn = get_conn()
+        row_count = conn.execute("SELECT COUNT(*) FROM pricing").fetchone()[0]
+        pp_sample = conn.execute("SELECT pp_price FROM pricing LIMIT 3").fetchall()
+        dp_sample = conn.execute("SELECT dep_date FROM pricing LIMIT 3").fetchall()
+        dest_sample = conn.execute("SELECT DISTINCT destination FROM pricing").fetchall()
+        conn.close()
+        st.write(f"Rows: {row_count}")
+        st.write(f"pp_price sample: {[r[0] for r in pp_sample]}")
+        st.write(f"dep_date sample: {[r[0] for r in dp_sample]}")
+        st.write(f"Destinations: {[r[0] for r in dest_sample]}")
+    except Exception as e:
+        st.write(f"DB error: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOAD DATA
