@@ -176,35 +176,37 @@ def find_price_col(data_df):
 def parse_pricing_file(uploaded_file, fname):
     dest, comp, file_dt = extract_meta(fname)
     all_rows = []
+    debug_info = []
 
     try:
         if fname.lower().endswith(".csv"):
             raw = pd.read_csv(uploaded_file, header=None, dtype=str, encoding="utf-8-sig")
             sheets = [("csv", raw)]
+            debug_info.append("csv")
         else:
             xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
-            sheets = find_data_sheets(xl)
-            if not sheets:
-                sheets = []
-                for sn in xl.sheet_names:
-                    try:
-                        raw = xl.parse(sn, header=None, dtype=str)
-                        if raw.shape[1] >= 18:
-                            sheets.append((sn, raw))
-                    except:
-                        pass
+            all_sheet_names = xl.sheet_names
+            debug_info = all_sheet_names  # show ALL sheet names
+
+            # Try every sheet — no skipping
+            sheets = []
+            for sn in all_sheet_names:
+                try:
+                    raw = xl.parse(sn, header=None, dtype=str)
+                    if raw.shape[1] >= 18 and raw.shape[0] >= 5:
+                        sheets.append((sn, raw))
+                except:
+                    pass
     except Exception as e:
-        st.error(f"Cannot open {fname}: {e}")
-        return []
+        return [], [f"ERROR opening file: {e}"]
 
     for sname, raw in sheets:
         hrow = find_header_row(raw)
         data = raw.iloc[hrow+1:].reset_index(drop=True).copy()
         data.columns = range(data.shape[1])
 
-        # Detect offset: find where pp_price column actually is
         price_col = find_price_col(data)
-        offset = price_col - 5  # expected at col 5
+        offset = price_col - 5
 
         def gc(base):
             idx = base + offset
@@ -248,11 +250,11 @@ def parse_pricing_file(uploaded_file, fname):
                     continue
 
                 rl = result.lower()
-                if "no comp" in rl:               result = "Win - No Comp"
-                elif "aft change" in rl:           result = "Win Aft Change"
-                elif "win" in rl:                  result = "Win"
-                elif "lose" in rl or "loss" in rl: result = "Lose"
-                else:                              continue
+                if "no comp" in rl:                result = "Win - No Comp"
+                elif "aft change" in rl:            result = "Win Aft Change"
+                elif "win" in rl:                   result = "Win"
+                elif "lose" in rl or "loss" in rl:  result = "Lose"
+                else:                               continue
 
                 dep_month = dep_dt.strftime("%Y-%m") if dep_dt else ""
                 dw = dep_window(dep_dt, file_dt) if dep_dt else "241+"
@@ -287,7 +289,7 @@ def parse_pricing_file(uploaded_file, fname):
             except:
                 continue
 
-    return all_rows
+    return all_rows, debug_info
 
 def calc_priority(row):
     tw = {"high":3,"medium":2,"low":1}.get(row.get("booking_tier","low"),1)
@@ -382,13 +384,14 @@ with st.sidebar:
     if uploaded:
         for uf in uploaded:
             with st.spinner(f"Parsing {uf.name}…"):
-                rows = parse_pricing_file(uf, uf.name)
+                rows, debug_info = parse_pricing_file(uf, uf.name)
+            st.info(f"📋 {uf.name} sheets: {debug_info}")
             if not rows:
                 st.error(f"❌ {uf.name}: 0 rows parsed — check file format")
                 continue
             n, skipped = save_rows(rows)
             if n > 0:
-                st.success(f"✅ {uf.name}: {n} rows added ({skipped} skipped as duplicate)")
+                st.success(f"✅ {uf.name}: {n} rows added ({skipped} skipped)")
             else:
                 st.info(f"ℹ {uf.name}: all {skipped} rows already in database")
 
