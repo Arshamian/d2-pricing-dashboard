@@ -139,27 +139,46 @@ def find_header_row(df_raw):
     return 0
 
 def find_data_sheets(xl):
+    """
+    For D2 files the main data sheet is called 'D2 - Data' or similar.
+    Priority: exact known names first, then fallback scan.
+    """
     results = []
-    skip = ["board","namegiata","summary","pivot","comp data",
-            "exclusiv","direct","lh only","tr only","otb only"]
-    for sname in xl.sheet_names:
-        if any(k in sname.lower() for k in skip):
-            continue
-        try:
-            raw = xl.parse(sname, header=None, dtype=str)
-            if raw.shape[1] < 18 or raw.shape[0] < 5:
+    # Priority sheet names to try first
+    priority = ["d2 - data","lh - data","tr - data","otb - data","data","mle","dxb","mru","tfs"]
+    # Sheets to always skip
+    skip = ["board codes","namegiata","summary pivot","exclusiv","direct",
+            "lh only","tr only","otb only","tb - data","tui - data",
+            "first search","mle trans","sheet1","sheet2","sheet3",
+            "sheet4","sheet5","exclusive offers"]
+
+    sheet_names_lower = {sn.lower(): sn for sn in xl.sheet_names}
+
+    # Try priority sheets first
+    for p in priority:
+        if p in sheet_names_lower:
+            sn = sheet_names_lower[p]
+            try:
+                raw = xl.parse(sn, header=None, dtype=str)
+                if raw.shape[1] >= 18 and raw.shape[0] >= 5:
+                    results.append((sn, raw))
+            except:
+                pass
+
+    # If nothing found yet, try remaining sheets not in skip list
+    if not results:
+        for sn in xl.sheet_names:
+            if any(s in sn.lower() for s in skip):
                 continue
-            found = False
-            for ri in range(min(15, len(raw))):
-                for ci in range(min(3, raw.shape[1])):
-                    v = str(raw.iloc[ri, ci]).strip()
-                    if v.isdigit() and len(v) >= 4:
-                        found = True; break
-                if found: break
-            if found:
-                results.append((sname, raw))
-        except:
-            continue
+            if sn.lower() in sheet_names_lower and sn.lower() in priority:
+                continue  # already tried
+            try:
+                raw = xl.parse(sn, header=None, dtype=str)
+                if raw.shape[1] >= 18 and raw.shape[0] >= 5:
+                    results.append((sn, raw))
+            except:
+                pass
+
     return results
 
 def find_price_col(data_df):
@@ -186,17 +205,10 @@ def parse_pricing_file(uploaded_file, fname):
         else:
             xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
             all_sheet_names = xl.sheet_names
-            debug_info = all_sheet_names  # show ALL sheet names
-
-            # Try every sheet — no skipping
-            sheets = []
-            for sn in all_sheet_names:
-                try:
-                    raw = xl.parse(sn, header=None, dtype=str)
-                    if raw.shape[1] >= 18 and raw.shape[0] >= 5:
-                        sheets.append((sn, raw))
-                except:
-                    pass
+            debug_info = all_sheet_names
+            sheets = find_data_sheets(xl)
+            if not sheets:
+                return [], [f"No data sheets found in: {all_sheet_names}"]
     except Exception as e:
         return [], [f"ERROR opening file: {e}"]
 
