@@ -220,6 +220,12 @@ def parse_pricing_file(uploaded_file, fname):
         price_col = find_price_col(data)
         offset = price_col - 5
 
+        # Debug: show first data row
+        debug_info.append(f"Sheet='{sname}' hrow={hrow} price_col={price_col} offset={offset} cols={data.shape[1]} rows={data.shape[0]}")
+        if len(data) > 0:
+            r0 = data.iloc[0]
+            debug_info.append(f"Row0: col0={r0.get(0)} col1={r0.get(1)} col3={r0.get(3)} col5={r0.get(5)} col6={r0.get(6)} col21={r0.get(21)}")
+
         def gc(base):
             idx = base + offset
             return idx if 0 <= idx < data.shape[1] else base
