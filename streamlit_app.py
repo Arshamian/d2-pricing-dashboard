@@ -300,13 +300,14 @@ def calc_priority(row):
     return round(tw*gs*ms*di,3)
 
 def save_rows(rows):
-    if not rows: return 0
-    conn = get_conn(); c = conn.cursor(); n = 0
+    if not rows: return 0, 0
+    conn = get_conn(); c = conn.cursor(); n = 0; skipped = 0
     for r in rows:
         r["priority_score"] = calc_priority(r)
+        # Dedup only on exact same file + hotel + dep_date + window
         c.execute("""SELECT id FROM pricing
-            WHERE file_name=? AND hotel_name=? AND dep_date=? AND dep_window=?""",
-            (r["file_name"],r["hotel_name"],r["dep_date"],r["dep_window"]))
+            WHERE file_name=? AND giata=? AND dep_date=? AND dep_window=?""",
+            (r["file_name"], r["giata"], r["dep_date"], r["dep_window"]))
         if c.fetchone() is None:
             c.execute("""INSERT INTO pricing(
                 file_name,file_date,destination,competitor,giata,hotel_name,board,
@@ -320,8 +321,10 @@ def save_rows(rows):
                     "comp_price","diff_gbp","diff_pct","result","margin_after","margin_range",
                     "margin_flag","booking_tier","priority_score","uploaded_at"]))
             n += 1
+        else:
+            skipped += 1
     conn.commit(); conn.close()
-    return n
+    return n, skipped
 
 def load_data(dest=None, comp=None, window=None, files=None):
     conn = get_conn()
@@ -380,9 +383,14 @@ with st.sidebar:
         for uf in uploaded:
             with st.spinner(f"Parsing {uf.name}…"):
                 rows = parse_pricing_file(uf, uf.name)
-            n = save_rows(rows)
-            if n > 0: st.success(f"✅ {uf.name}: {n} rows added")
-            else:     st.info(f"ℹ {uf.name}: already in database")
+            if not rows:
+                st.error(f"❌ {uf.name}: 0 rows parsed — check file format")
+                continue
+            n, skipped = save_rows(rows)
+            if n > 0:
+                st.success(f"✅ {uf.name}: {n} rows added ({skipped} skipped as duplicate)")
+            else:
+                st.info(f"ℹ {uf.name}: all {skipped} rows already in database")
 
     st.markdown("### 📊 Upload Bookings")
     bfile = st.file_uploader("CSV: hotel_name, destination, bkgs_4wk",
