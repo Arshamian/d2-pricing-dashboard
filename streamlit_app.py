@@ -143,6 +143,89 @@ def calc_priority(row):
     di  = 1.0 if dw=="0-60" else 1.1 if dw=="61-120" else 1.3 if dw=="121-240" else 1.2
     return round(tw*gs*ms*di,3)
 
+def suggest_markup_change(hrows, step=0.25, band=5.0):
+    """High-level suggested change to Total Markup (margin, in pp) for ONE hotel,
+    computed across its LATEST comparison rows (all departure dates / boards).
+
+    Idea: markup is the lever. Cutting markup lowers our price → more wins but
+    less margin; raising markup does the reverse. We sweep candidate markup
+    deltas and pick the one that maximises EXPECTED BOOKED MARGIN, defined as
+
+        projected_win_rate  ×  projected_avg_markup
+
+    i.e. how often we win × how much margin we keep. This naturally balances the
+    two asks: over-cutting kills margin (term 2 falls), and raising too far
+    converts wins to losses (term 1 falls), so the optimum sits in between.
+
+    Guardrails (never violated):
+      • no individual row is ever pushed below the 7% floor
+      • no individual row is ever pushed above the 15% ceiling
+      • among near-optimal deltas we pick the SMALLEST move (give away least margin)
+
+    Price sensitivity: a 1pp markup change moves price by ~100/(100+markup) %, so
+    a row's competitive gap shifts by that much. diff_pct>0 = D2 winning (cheaper),
+    diff_pct<0 = D2 losing (dearer); raising markup (delta>0) makes diff_pct smaller.
+
+    Returns dict: delta, wr0, wr1, m0, m1, note.
+    """
+    h = hrows.copy()
+    # Latest run only — "latest comparisons across all dates for the hotel"
+    if "file_date" in h.columns and h["file_date"].nunique() > 1:
+        h = h[h["file_date"] == h["file_date"].max()]
+
+    comp = h[h["result"].isin(["Win","Lose"])].copy()
+    base_m = pd.to_numeric(h.get("current_margin"), errors="coerce").mean()
+    base_m = float(base_m) if pd.notna(base_m) else 0.0
+
+    if comp.empty:
+        return {"delta":0.0,"wr0":np.nan,"wr1":np.nan,"m0":base_m,"m1":base_m,
+                "note":"No direct comp — raise selectively (dest-guided)"}
+
+    m_rows = pd.to_numeric(comp["current_margin"], errors="coerce").fillna(0.0).values
+    gaps   = pd.to_numeric(comp["diff_pct"],       errors="coerce").fillna(0.0).values
+    m0  = float(np.mean(m_rows))
+    wr0 = float((gaps > 0).mean()*100)
+
+    # Safe delta band: keep every row inside [floor, ceiling]
+    d_min = -max(0.0, float(np.min(m_rows)) - MARGIN_FLOOR)
+    d_max =  max(0.0, MARGIN_CEILING - float(np.max(m_rows)))
+    d_min, d_max = max(d_min, -band), min(d_max, band)
+    if d_max - d_min < step:
+        return {"delta":0.0,"wr0":wr0,"wr1":wr0,"m0":m0,"m1":m0,
+                "note":"At margin guardrail — hold"}
+
+    factors = 100.0/(100.0+np.clip(m_rows, 0, None))   # %price move per pp markup
+    cands = []
+    d = d_min
+    while d <= d_max + 1e-9:
+        m1 = m0 + d
+        if m1 >= MARGIN_FLOOR - 1e-9:
+            wr1 = float(((gaps - d*factors) > 0).mean()*100)   # win if still cheaper
+            obj = (wr1/100.0) * m1                              # expected booked margin
+            cands.append((round(d,2), wr1, m1, obj))
+        d += step
+
+    if not cands:
+        return {"delta":0.0,"wr0":wr0,"wr1":wr0,"m0":m0,"m1":m0,
+                "note":"At margin guardrail — hold"}
+
+    best_obj = max(c[3] for c in cands)
+    near = [c for c in cands if c[3] >= best_obj - 0.02]   # treat ~ties as equal
+    near.sort(key=lambda c:(abs(c[0]), -c[2]))             # smallest move, then higher margin
+    delta, wr1, m1, _ = near[0]
+    delta = round(delta, 1)
+
+    if delta <= -0.05:
+        flipped = int(round((wr1-wr0)/100.0 * len(gaps)))
+        note = f"Cut markup → ~{max(flipped,0)} loss(es) flip to win"
+    elif delta >= 0.05:
+        note = "Headroom to raise markup (wins safe)"
+    elif wr0 < 50:
+        note = "Product-led — losses too wide for markup to fix"
+    else:
+        note = "Maintain — already optimal"
+    return {"delta":delta,"wr0":wr0,"wr1":wr1,"m0":m0,"m1":m1,"note":note}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PARSER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -555,13 +638,33 @@ with tabs[1]:
             fig2.update_layout(height=300,margin=dict(t=40,b=10))
             st.plotly_chart(fig2,use_container_width=True)
     st.markdown("#### 🏆 Top Sellers")
+    st.caption("**Sugg. Markup Δ** = high-level change to Total Markup (in pp) per hotel, "
+               "across the latest comparisons over all departure dates. It maximises expected "
+               "booked margin (projected win rate × projected markup) while keeping every row "
+               "inside the 7% floor / 15% ceiling and giving away the least margin possible. "
+               "Negative = cut to convert losses; positive = headroom to raise where we already win.")
     ts = v.groupby(["giata","hotel_name"]).agg(
         Dest=("destination","first"),Comp=("competitor","first"),
         Rows=("hotel_name","count"),AvgMargin=("current_margin","mean"),
         HasLoss=("result",lambda x:"⚠ Loss" if (x=="Lose").any() else "✓ OK")
     ).sort_values("Rows",ascending=False).head(15).reset_index()
+
+    # Suggested markup change per hotel (across all its dates, latest run)
+    sug = [suggest_markup_change(
+              v[(v["giata"]==g) & (v["hotel_name"]==hn)])
+           for g, hn in zip(ts["giata"], ts["hotel_name"])]
+    sdf = pd.DataFrame(sug)
+    ts["SuggDelta"] = sdf["delta"].apply(lambda d: f"{d:+.1f}pp" if abs(d)>=0.05 else "0.0pp")
+    ts["ProjWR"]    = sdf.apply(lambda r: f"{r['wr0']:.0f}%→{r['wr1']:.0f}%"
+                                if pd.notna(r["wr0"]) else "—", axis=1)
+    ts["ProjMargin"]= sdf.apply(lambda r: f"{r['m0']:.1f}%→{r['m1']:.1f}%", axis=1)
+    ts["Note"]      = sdf["note"]
+
     ts["AvgMargin"] = ts["AvgMargin"].map("{:.1f}%".format)
-    ts.columns = ["Giata","Hotel","Dest","Comp","Rows","Avg Margin","Loss?"]
+    ts = ts[["giata","hotel_name","Dest","Comp","Rows","AvgMargin","HasLoss",
+             "SuggDelta","ProjWR","ProjMargin","Note"]]
+    ts.columns = ["Giata","Hotel","Dest","Comp","Rows","Avg Margin","Loss?",
+                  "Sugg. Markup Δ","Proj. Win Rate","Proj. Markup","Note"]
     st.dataframe(ts,use_container_width=True)
 
 # ── 3. HOTEL ACTIONS ───────────────────────────────────────────────────────────
