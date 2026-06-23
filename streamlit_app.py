@@ -43,6 +43,10 @@ NOISE_GAP       = 0.5   # |diff%| within this of zero = effectively even (pricin
 WR_HIGH         = 70.0  # at/above this win rate, bias to RAISE (capture margin) not cut
 WR_KEEP         = 70.0  # when raising, don't let win rate fall below this
 FLIP_FRAC       = 0.10  # when raising, tolerate flipping at most ~10% of solid wins
+# ── Product-gap detection ───────────────────────────────────────────────────────
+PRODUCT_GAP_SHARE = 0.5  # if >= this share of a hotel's losses can't be matched without
+                         #   breaching the margin floor, it's a product/contracting gap
+PRODUCT_GAP_MIN   = 2    # need at least this many below-floor losses to flag a hotel
 
 st.markdown("""
 <style>
@@ -1052,17 +1056,52 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("Product Gaps")
     st.warning("⚠ NEVER price cut — product/contracting fix required.")
+    st.caption(f"A hotel is flagged a **product gap** when a high share of its losses can't be "
+               f"matched without breaching the {MARGIN_FLOOR:.0f}% margin floor — i.e. to beat the "
+               f"competitor we'd have to price below our minimum margin. That's unreachable on price, "
+               f"so it's a product or contracting issue, not a markup one. "
+               f"(Threshold: ≥{PRODUCT_GAP_SHARE*100:.0f}% of losses below floor, min {PRODUCT_GAP_MIN}.)")
     v = tab_filters(df, "pg")
-    pg = v[v["result"]=="Lose"].copy()
-    pg = pg[pg["op_room"].str.lower().str.contains(
-        "suite|villa|overwater|pool villa|penthouse",na=False,regex=True)]
-    if pg.empty: pg = v[v["result"]=="Lose"].copy()
-    show7 = pg[["giata","hotel_name","destination","competitor","dep_window",
-                 "op_room","pp_price","comp_price","diff_pct","current_margin","booking_tier"]].copy()
-    show7.columns = ["Giata","Hotel","Dest","Comp","Window","D2 Room",
-                     "D2 £pp","Comp £pp","Gap %","Margin","Tier"]
-    show7["Action"] = "Product Fix — not price cut"
-    st.dataframe(with_bkg(show7),use_container_width=True,height=500)
+    losses = v[v["result"]=="Lose"].copy()
+    if losses.empty:
+        st.info("No losses in the current selection.")
+    else:
+        # A loss is "below floor" when matching the competitor would need a markup under the
+        # floor (margin_after < floor). Guard against missing margin_after (stored as 0).
+        losses["below_floor"] = (losses["margin_after"] > 0) & (losses["margin_after"] < MARGIN_FLOOR)
+        g = losses.groupby(["giata","hotel_name","destination","competitor"])
+        summ = g.agg(Loses=("result","size"),
+                     BelowFloor=("below_floor","sum"),
+                     AvgGap=("diff_pct","mean"),
+                     AvgMatchMarkup=("margin_after","mean")).reset_index()
+        summ["Share"] = summ["BelowFloor"] / summ["Loses"]
+        summ["ProductGap"] = (summ["Share"] >= PRODUCT_GAP_SHARE) & (summ["BelowFloor"] >= PRODUCT_GAP_MIN)
+        if HAS_BKG:
+            summ["Bookings"] = summ["giata"].map(lambda x: bk_map.get(norm_giata(x), 0))
+        summ = summ.sort_values(["ProductGap","BelowFloor"], ascending=[False,False])
+
+        n_gap = int(summ["ProductGap"].sum())
+        if n_gap:
+            st.error(f"🚫 {n_gap} hotel(s) flagged as product gaps — competitor undercuts beyond "
+                     f"what margin can reach.")
+        else:
+            st.success("No hotels meet the product-gap threshold in this selection.")
+
+        out = pd.DataFrame({
+            "Giata":summ["giata"], "Hotel":summ["hotel_name"],
+            "Dest":summ["destination"], "Comp":summ["competitor"],
+        })
+        if HAS_BKG: out["📊 Bkgs"] = summ["Bookings"].map("{:,.0f}".format)
+        out["Loses"]          = summ["Loses"]
+        out["Below Floor"]    = summ["BelowFloor"].astype(int)
+        out["% Below Floor"]  = (summ["Share"]*100).map("{:.0f}%".format)
+        out["Avg Gap %"]      = summ["AvgGap"].map("{:.1f}%".format)
+        out["Match Markup"]   = summ["AvgMatchMarkup"].map(lambda x: f"{x:.1f}%" if x>0 else "—")
+        out["Verdict"]        = np.where(summ["ProductGap"], "🚫 Product Gap", "Reachable on price")
+        st.dataframe(out, use_container_width=True, height=460)
+        st.caption(f"{len(out)} hotels with losses · {n_gap} product gaps · "
+                   f"“Match Markup” is the average markup we’d need to match the competitor "
+                   f"(below {MARGIN_FLOOR:.0f}% = unreachable).")
 
 # ── 8. NO COMP ─────────────────────────────────────────────────────────────────
 with tabs[7]:
@@ -1081,18 +1120,38 @@ with tabs[7]:
     # Only hotels with NO comparison on ANY date across the data. Hotels that DO have a
     # comparison on other dates are excluded here and handled by the markup suggestions.
     nc2 = nc2[~nc2["giata"].isin(compared_giatas)]
-    nc2["Stance"] = nc2.apply(lambda r:stances.get((r["destination"],r["dep_window"]),"Hold — Optimise Margin"),axis=1)
-    show8 = nc2[["giata","hotel_name","destination","competitor","dep_window","dep_month",
-                  "pp_price","current_margin","Stance","booking_tier"]].copy()
-    show8.columns = ["Giata","Hotel","Dest","Comp","Window","Month",
-                     "D2 £pp","Margin","Dest Stance","Tier"]
-    st.dataframe(with_bkg(show8),use_container_width=True,height=500)
-    if not nc2.empty:
+    if nc2.empty:
+        st.caption("No hotels are uncompared across all dates in the current selection.")
+    else:
+        nc2["Stance"] = nc2.apply(lambda r:stances.get((r["destination"],r["dep_window"]),"Hold — Optimise Margin"),axis=1)
+        if HAS_BKG:
+            nc2["bkg"] = nc2["giata"].map(lambda x: bk_map.get(norm_giata(x), 0))
+            nc2["rev"] = nc2["giata"].map(lambda x: rev_map.get(norm_giata(x), 0.0))
+            # Opportunity: no competitor anywhere, but we ARE selling it → room to raise margin
+            booked = nc2[nc2["bkg"] > 0]
+            if not booked.empty:
+                st.success(f"💡 {booked['giata'].nunique()} no-comp hotel(s) have bookings "
+                           f"({int(booked.drop_duplicates('giata')['bkg'].sum()):,} bookings, "
+                           f"£{booked.drop_duplicates('giata')['rev'].sum():,.0f} revenue) — no competitor "
+                           f"on any date, so candidates to **increase margin**.")
+            nc2 = nc2.sort_values("bkg", ascending=False)
+            nc2["Opportunity"] = np.where(nc2["bkg"] > 0, "💡 Booked — review margin", "")
+            show8 = nc2[["giata","hotel_name","destination","dep_window","dep_month",
+                         "pp_price","current_margin","bkg","rev","Opportunity","Stance"]].copy()
+            show8["bkg"] = show8["bkg"].map("{:,.0f}".format)
+            show8["rev"] = show8["rev"].map(lambda x: f"£{x:,.0f}" if x>0 else "—")
+            show8.columns = ["Giata","Hotel","Dest","Window","Month",
+                             "D2 £pp","Margin","📊 Bkgs","Revenue","Opportunity","Dest Stance"]
+        else:
+            show8 = nc2[["giata","hotel_name","destination","competitor","dep_window","dep_month",
+                          "pp_price","current_margin","Stance","booking_tier"]].copy()
+            show8.columns = ["Giata","Hotel","Dest","Comp","Window","Month",
+                             "D2 £pp","Margin","Dest Stance","Tier"]
+        st.dataframe(show8,use_container_width=True,height=500)
         st.caption(f"{nc2['giata'].nunique()} hotel(s) with no comparison on any date "
                    f"({len(nc2)} rows). Hotels compared on other dates are excluded and "
-                   f"driven by the markup suggestions instead.")
-    else:
-        st.caption("No hotels are uncompared across all dates in the current selection.")
+                   f"driven by the markup suggestions instead."
+                   + ("" if HAS_BKG else "  Upload bookings to highlight which of these are selling."))
 
 # ── 9. DEST ACTIONS ────────────────────────────────────────────────────────────
 with tabs[8]:
@@ -1552,8 +1611,9 @@ two — and volume also pushes the busiest hotels up the action lists.
     st.markdown("""
 The **No Comp** tab lists only hotels with **no competitor comparison on any date at all**. If a hotel
 has a comparison on even one date, it's treated as a normal hotel and handled by the margin suggestions —
-its no-comp dates simply don't affect the decision. For genuinely uncompared hotels, the app falls back to
-a destination-level steer rather than guessing.
+its no-comp dates simply don't affect the decision. When booking data is loaded, any of these hotels that
+are **actually selling** are highlighted: no competitor + real bookings is a prime candidate to **raise
+margin**. For genuinely uncompared hotels with no bookings, the app falls back to a destination-level steer.
 """)
 
     st.markdown("### 7.  A quick tour of the tabs")
@@ -1564,7 +1624,7 @@ a destination-level steer rather than guessing.
 | **Overview** | Headline picture: win rate, losses, margin, bookings, and Top Sellers with each hotel's suggested margin change. |
 | **Hotel Actions** | Every hotel/date with its recommended action, filterable. |
 | **Reduce / Raise / Maintain** | The same actions split into three buckets — where to cut, raise, or hold. |
-| **Product Gaps** | Losses too wide for any sensible price change — a product/contracting issue, not pricing. |
+| **Product Gaps** | Hotels where most losses can't be matched without breaking the margin floor — unreachable on price, so a product/contracting issue. |
 | **No Comp** | Hotels with no competitor on any date (see §6). |
 | **Dest Actions** | The competitive picture rolled up by destination and departure window. |
 | **Outliers** | Consistent losers to fix and big-win opportunities to capitalise on. |
