@@ -1,0 +1,15 @@
+# Streamlit configuration
+# ----------------------------------------------------------------------------
+# Place this file at:  .streamlit/config.toml  in the root of your GitHub repo
+# (create the ".streamlit" folder if it doesn't exist), commit, and redeploy.
+#
+# "minimal" toolbar mode removes Streamlit's developer tools and, with them, the
+# developer keyboard shortcuts — including "C" (Clear caches) and "R" (Rerun)
+# that were firing when you pressed Ctrl+C to copy a cell. Copying then works
+# normally with no popup.
+#
+# If you'd rather keep a small menu visible, use "viewer" instead of "minimal";
+# it also disables those developer shortcuts.
+
+[client]
+toolbarMode = "minimal"
