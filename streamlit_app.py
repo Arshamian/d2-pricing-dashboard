@@ -33,11 +33,11 @@ if os.path.exists("reset_flag.txt"):
     except:
         pass
 
-MARGIN_FLOOR    = 7.0
+MARGIN_FLOOR    = 8.0
 MARGIN_CEILING  = 15.0
-MARGIN_NEAR     = 8.5
+MARGIN_NEAR     = 9.0
 RAISE_THRESHOLD = 15.0
-HOLD_UPPER      = 8.0
+HOLD_UPPER      = 8.5
 # ── Markup-suggestion tuning ────────────────────────────────────────────────────
 NOISE_GAP       = 0.5   # |diff%| within this of zero = effectively even (pricing/refresh
                         #   noise) — never chase such a "loss" with a margin cut
