@@ -33,7 +33,7 @@ if os.path.exists("reset_flag.txt"):
     except:
         pass
 
-MARGIN_FLOOR    = 7.0
+MARGIN_FLOOR    = 7.5
 MARGIN_CEILING  = 15.0
 MARGIN_NEAR     = 8.5
 RAISE_THRESHOLD = 15.0
